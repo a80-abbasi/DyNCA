@@ -1,7 +1,7 @@
 import torch
 import torchvision.transforms.functional as TF
 import torch.nn.functional as F
-
+import torchvision
 import torchvision.models as torch_models
 import numpy as np
 
@@ -24,6 +24,11 @@ class AppearanceLoss(torch.nn.Module):
         self.slw_weight = args.texture_slw_weight
         self.ot_weight = args.texture_ot_weight
         self.gram_weight = args.texture_gram_weight
+        
+        if self.args.loss_scales is None:
+            self.args.loss_scales = [0]
+            self.args.scale_weights = [1.0]
+        
 
         self._create_losses()
 
@@ -47,23 +52,43 @@ class AppearanceLoss(torch.nn.Module):
 
     def forward(self, input_dict, return_summary=True):
         loss = 0.0
-        target_image_list = input_dict['target_image_list']
-        generated_image_list = input_dict['generated_image_list']
-        for target_images, generated_images in zip(target_image_list, generated_image_list):
-            b, c, h, w = generated_images.shape
-            _, _, ht, wt = target_images.shape
+        target_images = input_dict['target_images']
+        generated_images = input_dict['generated_images']
+        
+        ys = []
+        xs = []
+        
+        b, c, h, w = generated_images.shape
+        _, _, ht, wt = target_images.shape
 
-            # Scale the images before feeding to VGG
-            generated_images = (generated_images + 1.0) / 2.0
-            target_images = (target_images + 1.0) / 2.0
+        if h != ht or w != wt:
+            target_images = TF.resize(target_images, size=(h, w))
+            
 
-            if h != ht or w != wt:
-                target_images = TF.resize(target_images, size=(h, w))
+        generated_images = (generated_images + 1.0) / 2.0
+        target_images = (target_images + 1.0) / 2.0
+
+
+        for scale in self.args.loss_scales:
+
+            x = generated_images
+            y = target_images
+            h_new = int(h // (2 ** scale))
+            w_new = int(w // (2 ** scale))
+            
+            x = F.interpolate(x, size=(h_new, w_new), mode='bilinear', align_corners=False)
+            y = F.interpolate(y, size=(h_new, w_new), mode='bilinear', align_corners=False)
+            
+            scale_loss = 0.0
+            
             for loss_name in self.loss_mapper:
                 loss_weight = self.loss_weights[loss_name]
                 loss_func = self.loss_mapper[loss_name]
-                loss += loss_weight * loss_func(target_images, generated_images)
-        loss /= len(generated_image_list)
+                scale_loss += loss_weight * loss_func(y, x)
+                
+            loss += scale_loss * self.args.scale_weights[scale]
+                    
+        loss /= len(self.args.loss_scales)
         return loss, None, None
 
 
